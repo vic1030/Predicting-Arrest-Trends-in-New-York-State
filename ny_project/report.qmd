@@ -1,0 +1,976 @@
+---
+title: "Analyzing Socioeconomic and Housing Factors to Predict Arrest Trends in New York State"
+author: "Joyce Yan (qy249), Lydia Lin (dl2253), Victoria Xiao (sx287)"
+date: today
+format: pdf
+---
+
+# Set up
+
+```{r}
+#| label: import-packages
+
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(reshape2)
+library(tidyverse)
+library(tidymodels)
+library(poissonreg)
+```
+
+# Objective
+
+Our project aims to predict **the total number of adult arrests in New
+York State counties based on key social, economic, and housing factors
+from 2015 to 2022**. By analyzing historical data and identifying
+patterns, we want to understand how these factors influence arrest
+counts and use this knowledge to create a reliable predictive model.
+
+This model can help policymakers and law enforcement anticipate trends
+in crime and allocate resources more effectively. Our goal is to address
+two key problems:
+
+1.  Identifying which socioeconomic and housing factors are most
+    strongly associated with arrest counts.
+2.  Developing a predictive tool to estimate future arrest counts, which
+    can guide decisions on crime prevention and community support.
+
+By achieving these objectives, we hope to contribute to data-driven
+strategies for building safer, more equitable communities.
+
+# Data description
+
+Our analysis-ready dataset combines arrest data with socioeconomic and
+housing characteristics for counties in New York State from 2015 to
+2022. The dataset is organized at the county-year level and includes
+both arrest counts by offense type and demographic, economic, and
+housing indicators as rates. This structure makes it suitable for
+exploring relationships and building predictive models.
+
+## Variables in the dataset
+
+### General Information
+
+-   **County**: The name of the county in New York State.
+-   **Year**: The year of the data, ranging from 2015 to 2022.
+
+### Arrest Data
+
+-   **Total**: Total adult arrest counts in the county for the
+    respective year.
+-   **Felony Total**: Total felony arrests.
+    -   **Drug Felony**: Arrests for drug-related felonies.
+    -   **Violent Felony**: Arrests for violent felonies.
+    -   **DWI Felony**: Arrests for driving while intoxicated (DWI)
+        felonies.
+    -   **Other Felony**: Arrests for other felony offenses.
+-   **Misdemeanor Total**: Total misdemeanor arrests.
+    -   **Drug Misdemeanor**: Arrests for drug-related misdemeanors.
+    -   **DWI Misdemeanor**: Arrests for DWI misdemeanors.
+    -   **Property Misdemeanor**: Arrests for property-related
+        misdemeanors.
+    -   **Other Misdemeanor**: Arrests for other misdemeanor offenses.
+
+### Social Characteristics
+
+-   **Less_than_9th_grade**: Percentage of the population aged 25 and
+    over with less than a 9th-grade education.
+-   **With_disability**: Percentage of the civilian noninstitutionalized
+    population with a disability.
+-   **Civilian_veterans**: Percentage of the civilian population aged 18
+    years and over who are veterans.
+-   **Limited_English**: Percentage of the population aged 5 and over
+    who speak a language other than English at home and speak English
+    less than "very well."
+
+### Housing Characteristics
+
+-   **Total_housing_units**: Total housing units in terms of occupancy
+    as a percentage of the population.
+-   **With_mortgage**: Percentage of owner-occupied housing units that
+    have a mortgage.
+-   **Without_mortgage**: Percentage of owner-occupied housing units
+    without a mortgage.
+
+### Economic Characteristics
+
+-   **Unemployment_rate**: The percentage of the civilian labor force
+    that is unemployed.
+-   **Median_household_income**: Median income of all households in the
+    county, adjusted for 2022 inflation.
+-   **Below_poverty_level**: Percentage of individuals aged 18 and over
+    whose income is below the poverty threshold.
+-   **No_health_insurance**: Percentage of the civilian
+    noninstitutionalized population without health insurance coverage.
+
+The dataset ensures comparability across counties by using rates instead
+of raw counts for demographic, economic, and housing variables. This
+approach accounts for differences in county population sizes, making the
+data suitable for cross-county analysis.
+
+# EDA
+
+Based on our team’s previous exploration, we observed a significant
+variation in the population sizes of counties in New York State. Some
+counties have substantially larger populations compared to others. To
+minimize bias, it would be more appropriate to use percentages for our
+feature columns instead of raw counts. Therefore, we decided to revisit
+the data cleaning process and transform the count-based features into
+percentage-based features. We will then perform exploratory data
+analysis using these newly transformed feature columns.
+
+You can find our detailed data cleaning process in the **explore.qmd**
+file. I will export a cleaned **merged_data.csv** file with the
+percentage features added to facilitate further analysis.
+
+If we were to display all 62 counties in New York State in our EDA, the
+plots would become overly cluttered and difficult to interpret.
+Therefore, we decided to focus on the top 10 counties with the highest
+arrests to initially explore relationships between variables. Later, we
+will apply feature selection methods to gain a deeper understanding of
+the key features.
+
+```{r}
+#| label: merged-data
+
+df = read_csv("data/merged_data.csv")
+head(df)
+```
+
+## EDA on arrests
+
+```{r}
+#| label: eda-arrests
+
+# Determine top 10 counties with the most arrests
+top_counties <- df |> 
+  group_by(County) |> 
+  summarize(Total_Arrests = sum(Total, na.rm = TRUE)) |> 
+  arrange(desc(Total_Arrests)) |> 
+  slice(1:10) |> 
+  pull(County)
+
+# Filter the dataset to include only the top 10 counties
+df_top10 <- df |> 
+  filter(County %in% top_counties)
+
+# Horizontal bar plot showing the average number of total arrests for each of the top 10 counties
+county_summary_top10 <- df_top10 |>
+  group_by(County) |>
+  summarize(Average_Total_Arrests = mean(Total, na.rm = TRUE))
+
+ggplot(county_summary_top10, aes(x = reorder(County, Average_Total_Arrests), y = Average_Total_Arrests)) +
+  geom_bar(stat = "identity", fill = "lightblue") +
+  coord_flip() +
+  labs(
+    title = "Average Arrests Per County (Top 10 Counties)",
+    x = "County",
+    y = "Average Total Arrests"
+  )
+
+# Line plot showing the total number of arrests over time for the top 10 counties
+ggplot(df_top10, aes(x = Year, y = Total, color = County)) +
+  geom_line() +
+  labs(
+    title = "Trends in Total Arrests Over Time (Top 10 Counties)",
+    x = "Year",
+    y = "Total Arrests"
+  )
+
+# Grouped bar plot showing the number of arrests by type for each of the top 10 counties
+arrests_stacked_top10 <- melt(
+  df_top10,
+  id.vars = c("County", "Year"),
+  measure.vars = c("Drug Felony", "Violent Felony", "DWI Felony", "Other Felony", 
+                   "Drug Misdemeanor", "DWI Misdemeanor", "Property Misdemeanor", "Other Misdemeanor"),
+  variable.name = "Arrest_Type",
+  value.name = "Count"
+)
+
+arrests_felony <- arrests_stacked_top10 |> 
+  filter(grepl("Felony", Arrest_Type))
+
+arrests_misdemeanor <- arrests_stacked_top10 |> 
+  filter(grepl("Misdemeanor", Arrest_Type))
+
+# Felony
+ggplot(arrests_felony, aes(x = Arrest_Type, y = Count, fill = County)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(
+    title = "Felony Arrest Counts by Type and County (Top 10 Counties)",
+    x = "Felony Arrest Type",
+    y = "Total Arrests"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+# Misdemeanor
+ggplot(arrests_misdemeanor, aes(x = Arrest_Type, y = Count, fill = County)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(
+    title = "Misdemeanor Arrest Counts by Type and County (Top 10 Counties)",
+    x = "Misdemeanor Arrest Type",
+    y = "Total Arrests"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+```
+
+Based on our analysis of arrest data in New York State from 2015 to
+2022, several key insights emerge. First, urban counties such as Kings,
+New York, and Bronx consistently lead in total arrests, with
+significantly higher average arrests compared to suburban and rural
+counties. This disparity highlights the influence of population density
+and socioeconomic challenges on arrest rates. Among felony arrests,
+violent crimes contribute the largest proportion after "Other Felonies,"
+while property-related offenses account for the majority of misdemeanor
+arrests after "Other Misdemeanors." These patterns suggest strong
+correlations with socioeconomic factors such as income, unemployment,
+and housing instability. Additionally, all counties exhibit a similar
+trend in total arrests over time, indicating that year is a significant
+factor influencing arrest rates.
+
+## EDA on social characteristics
+
+```{r}
+#| label: eda-social
+
+# Reshape social and crime data for scatter plots
+social_crime_data <- df_top10 |>
+  select(County, Year, Total, Less_than_9th_grade, With_disability, Civilian_veterans, Limited_English) |>
+  pivot_longer(cols = c(Less_than_9th_grade, With_disability, Civilian_veterans, Limited_English), 
+               names_to = "Social_Variable", values_to = "Social_Value")
+
+# Scatter plot of social variables vs. total crimes
+ggplot(social_crime_data, aes(x = Social_Value, y = Total, color = County)) +
+  geom_point(alpha = 0.7) +
+  facet_wrap(~ Social_Variable, scales = "free") +
+  labs(
+    title = "Relationship Between Social Characteristics and Total Arrests",
+    x = "Social Characteristic Value",
+    y = "Total Arrests"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+# Correlation heatmap for social and crime variables
+correlation_matrix_social <- df_top10 |>
+  select(Less_than_9th_grade, With_disability, Civilian_veterans, Limited_English, 
+         Total, `Felony Total`, `Misdemeanor Total`) |>
+  cor()
+
+ggplot(melt(correlation_matrix_social), aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0) +
+  labs(
+    title = "Correlation Between Social Characteristics and Crime Data",
+    x = "",
+    y = ""
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1), 
+    axis.text.y = element_text()
+  )
+```
+
+The scatter plots reveal a potential positive correlation between social
+variables and total arrests, particularly in counties with higher arrest
+rates. For instance, counties such as New York and Bronx exhibit both
+elevated arrest totals and significant socioeconomic challenges,
+including lower education levels and higher rates of disabilities. The
+correlation heatmap supports these findings, showing moderate to strong
+relationships between social characteristics and crime variables, such
+as misdemeanor and felony arrests. These insights suggest that
+socioeconomic factors—including education, disability status, and
+language barriers—play a critical role in shaping arrest rates.
+
+## EDA on economic characteristics
+
+```{r}
+#| label: edd-economic
+
+# Reshape economic and crime data for scatter plots
+economic_crime_data <- df_top10 |>
+  select(County, Year, Total, Unemployment_rate, Median_household_income, Below_poverty_level, No_health_insurance) |>
+  pivot_longer(cols = c(Unemployment_rate, Median_household_income, Below_poverty_level, No_health_insurance), 
+               names_to = "Economic_Variable", values_to = "Economic_Value")
+
+# Scatter plot of economic variables vs. total crimes
+ggplot(economic_crime_data, aes(x = Economic_Value, y = Total, color = County)) +
+  geom_point(alpha = 0.7) +
+  facet_wrap(~ Economic_Variable, scales = "free") +
+  labs(
+    title = "Relationship Between Economic Factors and Total Arrests",
+    x = "Economic Factor Value",
+    y = "Total Arrests"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+# Correlation heatmap for economic and crime variables
+correlation_matrix_economic <- df_top10 |>
+  select(Unemployment_rate, Median_household_income, Below_poverty_level, No_health_insurance, 
+         Total, `Felony Total`, `Misdemeanor Total`) |>
+  cor()
+
+ggplot(melt(correlation_matrix_economic), aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0) +
+  labs(
+    title = "Correlation Between Economic Factors and Crime Data",
+    x = "",
+    y = ""
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1), 
+    axis.text.y = element_text()
+  )
+```
+
+The scatter plots highlight notable trends: higher unemployment rates
+and greater percentages of the population below the poverty level are
+associated with increased total arrests, particularly in counties like
+Bronx and New York. Conversely, higher median household incomes show a
+negative correlation with total arrests, indicating that wealthier areas
+experience fewer arrests. Additionally, the percentage of individuals
+without health insurance exhibits a positive correlation with arrest
+totals, further emphasizing the role of economic vulnerability in
+influencing crime rates. The correlation heatmap reinforces these
+findings, with strong positive correlations observed between
+unemployment, poverty, and crime variables such as misdemeanor and
+felony arrests. These results suggest that economic instability,
+including unemployment, poverty, and lack of access to healthcare, are
+significant drivers of crime.
+
+## EDA on housing characteristics
+
+```{r}
+#| label: eda-housing
+
+# Reshape housing and crime data for scatter plots
+housing_crime_data <- df_top10 |>
+  select(County, Year, Total, Total_housing_units, With_mortgage, Without_mortgage) |>
+  pivot_longer(cols = c(Total_housing_units, With_mortgage, Without_mortgage), 
+               names_to = "Housing_Variable", values_to = "Housing_Value")
+
+# Scatter plot of housing variables vs. total crimes
+ggplot(housing_crime_data, aes(x = Housing_Value, y = Total, color = County)) +
+  geom_point(alpha = 0.7) +
+  facet_wrap(~ Housing_Variable, scales = "free") +
+  labs(
+    title = "Relationship Between Housing Characteristics and Total Arrests",
+    x = "Housing Characteristic Value",
+    y = "Total Arrests"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+# Correlation heatmap for housing and crime variables
+correlation_matrix_housing <- df_top10 |>
+  select(Total_housing_units, With_mortgage, Without_mortgage, 
+         Total, `Felony Total`, `Misdemeanor Total`) |>
+  cor()
+
+ggplot(melt(correlation_matrix_housing), aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0) +
+  labs(
+    title = "Correlation Between Housing Characteristics and Crime Data",
+    x = "",
+    y = ""
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+    axis.text.y = element_text() 
+  )
+```
+
+The scatter plots show no strong trends between housing variables and
+total arrests across counties. Similarly, the correlation heatmap
+indicates that while total housing units and homes with mortgages have
+slight positive correlations with crime metrics, these relationships are
+far weaker than those observed with economic or social factors. The
+"total housing units" variable forms a straight line, making it
+difficult to determine any meaningful trend. Both "with mortgage" and
+"without mortgage" variables show slight trends, but it is challenging
+to determine whether they are positive or negative, as the scatter
+points are widely dispersed. Overall, housing characteristics appear to
+have a limited influence on crime patterns, suggesting that other
+factors play a more significant role in shaping arrest rates.
+
+# Decisions based on EDA
+
+According to our EDA process, we determined that four economic
+variables—"Below Poverty Level," "Median Household Income,"
+"Unemployment Rate," and "No Health Insurance"—show a noticeable
+correlation with arrests, suggesting that these are critical predictors.
+In contrast, the social and housing factors exhibit weaker relationships
+with total arrests, with no obvious recognizable trends and low
+correlation values in the heatmaps. Instead of outright exclusion, we
+decided to perform feature engineering to transform these variables into
+potentially more meaningful representations.
+
+```{r}
+#| label: feature-engineer
+
+# Create the engineered features
+df <- df |>
+  mutate(
+    # Mortgage Affordability Index
+    Mortgage_affordability_index = With_mortgage / (Without_mortgage + 1),
+
+    # Log Housing Units
+    Log_housing_units = log(Total_housing_units + 1),
+    
+    # Log Mortgage Ratio
+    mortgage_ratio = With_mortgage / Total_housing_units,
+    Log_mortgage_ratio = log(mortgage_ratio + 1),
+
+    # Language × Education Interaction
+    Language_education_interaction = Limited_English * Less_than_9th_grade,
+    
+    # Unemployment × Poverty Interaction
+    Unemployment_poverty_interaction = Unemployment_rate * Below_poverty_level
+  )
+
+# Filter the dataset to include only the top 10 counties
+df_top10 <- df |> 
+  filter(County %in% top_counties)
+
+# Reshape engineered data for scatter plots
+engineered_data <- df_top10 |> 
+  select(County, Year, Total,
+         Mortgage_affordability_index, Log_housing_units, 
+         Log_mortgage_ratio, Language_education_interaction, 
+         Unemployment_poverty_interaction) |> 
+  pivot_longer(cols = c(Mortgage_affordability_index, Log_housing_units, 
+                        Log_mortgage_ratio, Language_education_interaction, 
+                        Unemployment_poverty_interaction), 
+               names_to = "Engineered_Variable", values_to = "Engineered_Value")
+
+# Scatter plot of engineered variables vs. total crimes
+ggplot(engineered_data, aes(x = Engineered_Value, y = Total, color = County)) +
+  geom_point(alpha = 0.7) +
+  facet_wrap(~ Engineered_Variable, scales = "free") +
+  labs(
+    title = "Relationship Between Engineered Characteristics and Total Arrests",
+    x = "Engineered Characteristic Value",
+    y = "Total Arrests"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+# Correlation heatmap for engineered variables and crime data
+correlation_matrix_engineered <- df_top10 |> 
+  select(
+         Mortgage_affordability_index, Log_housing_units, 
+         Log_mortgage_ratio, Language_education_interaction,
+         Unemployment_poverty_interaction,
+         Total, `Felony Total`, `Misdemeanor Total`) |> 
+  cor()
+
+ggplot(melt(correlation_matrix_engineered), aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0) +
+  labs(
+    title = "Correlation Between Engineered Characteristics and Crime Data",
+    x = "",
+    y = ""
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+    axis.text.y = element_text() 
+  )
+
+```
+
+## New variables after feature engineering
+
+We performed feature engineering on the dataset to create new derived
+features based on domain knowledge and mathematical transformations.
+
+-   **Mortgage_affordability_index**: This feature reflects the relative
+    affordability of housing by comparing the number of households with
+    a mortgage to those without one. Adding +1 ensures no division by
+    zero for areas with zero mortgage-free housing.
+-   **Log_housing_units**: This is a logarithmic transformation of the
+    total housing units to normalize the data distribution and reduce
+    the influence of extreme outliers.
+-   **Log_mortgage_ratio**: It applies a logarithmic transformation of
+    mortgage ratio to reduce skewness.
+-   **Language_education_interaction**: This feature models the
+    compounded effect of language barriers and low education levels.
+    Combining these two social factors allows us to explore whether
+    their combined impact has a stronger association with arrests than
+    the individual factors alone.
+-   **Unemployment × Poverty Interaction**: Combined "Unemployment Rate"
+    and "Below Poverty Level" to account for the compounded effect of
+    economic stress on crime rates. This interaction models how the
+    combination of unemployment and poverty amplifies arrest rates.
+
+## Features included in models
+
+-   **Mortgage_affordability_index**
+
+-   **Log_housing_units**
+
+-   **Log_mortgage_ratio**
+
+-   **Language_education_interaction**
+
+-   **Unemployment_poverty_interaction**
+
+-   **Unemployment_rate**
+
+-   **Median_household_income**
+
+-   **Below_poverty_level**
+
+-   **No_health_insurance**
+
+-   **Felony Total**
+
+    -   **Drug Felony**
+    -   **Violent Felony**
+    -   **DWI Felony**
+    -   **Other Felony**
+
+-   **Misdemeanor Total**
+
+    -   **Drug Misdemeanor**
+    -   **DWI Misdemeanor**
+    -   **Property Misdemeanor**
+    -   **Other Misdemeanor**
+
+-   **County**
+
+-   **Year**
+
+# Resampling strategy
+
+We chose an **80/20 training-test split** stratified by the target variable, 
+Total (total arrest counts), to ensure both subsets reflect the distribution 
+of arrest counts. Stratification helps maintain representativeness in both the 
+training and testing sets, particularly when the target variable has an uneven 
+distribution. This split ratio is standard in predictive modeling and provides 
+a good balance between having sufficient data for training and retaining a 
+significant portion for unbiased testing.
+
+Additionally, we applied **5-fold cross-validation** within the training set to 
+further validate our models. This approach ensures that all data points are used 
+for both training and validation, reducing the risk of overfitting while maximizing 
+data efficiency. Five folds were selected as a balance between computational 
+efficiency and robust evaluation, making it particularly appropriate given the 
+size of our dataset and the complexity of our models. 
+
+Together, these strategies 
+provide a comprehensive evaluation framework, allowing us to assess model 
+generalizability before applying it to the test set.
+
+```{r}
+#| label: resampling
+
+# Select relevant columns for modeling
+model_features <- df |> 
+  select(
+    # Socio-economic and housing features
+    Mortgage_affordability_index,
+    Log_housing_units,
+    Log_mortgage_ratio,
+    Language_education_interaction,
+    Unemployment_poverty_interaction,
+    Unemployment_rate,
+    Median_household_income,
+    Below_poverty_level,
+    No_health_insurance,
+    
+    # Arrest data features
+    `Felony Total`,
+    `Drug Felony`,
+    `Violent Felony`,
+    `DWI Felony`,
+    `Other Felony`,
+    `Misdemeanor Total`,
+    `Drug Misdemeanor`,
+    `DWI Misdemeanor`,
+    `Property Misdemeanor`,
+    `Other Misdemeanor`,
+    County,
+    Year,
+    
+    # Target variable
+    Total
+  )
+
+df <- df |> mutate(County = as.character(County))
+
+set.seed(123)
+
+data_split <- initial_split(model_features, prop = 0.8, strata = Total)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+cv_folds <- vfold_cv(train_data, v = 5, strata = Total)
+
+all_metrics <- metric_set(rmse, rsq, mae)
+```
+
+# Overview of modeling strategies
+
+## Models to be compared
+
+1.  **Null Model:**
+
+-  Serves as a baseline model for comparison with the performance of 
+   Poisson regression and Random Forest.
+
+2.  **Poisson Regression:**
+
+-   We will test two variations:
+    -   Using `factor (Year)` to capture year-specific fixed effects.
+    -   Using `Year` as a continuous variable to capture linear temporal
+        trends.
+-   Interaction terms (e.g., **Unemployment Rate × Below Poverty
+    Level**) will be included to explore combined effects of key
+    predictors.
+-   The model’s coefficients will provide insights into the strength and
+    direction of relationships between predictors and arrest counts.
+
+3.  **Random Forest:**
+
+-   Train Random Forest models using the same set of predictors as
+    Poisson regression:
+    -   Economic variables: `Unemployment Rate`,
+        `Median Household Income`, `Below Poverty Level`,
+        `No Health Insurance`.
+    -   Engineered features: `Mortgage Affordability Index`,
+        `Log Housing Units`, `Log Mortgage Ratio`,
+        `Language × Education Interaction`, and
+        `Unemployment × Poverty Interaction`.
+    -   Metadata: `County` and `Year`.
+-   Tune hyperparameters to optimize performance:
+    -   Number of trees (`n_estimators`)
+    -   Maximum tree depth
+    -   Minimum samples per split
+
+## Evaluation Metrics
+
+-   **Prediction Performance:**
+    -   Root Mean Squared Error (RMSE): To evaluate the average
+        magnitude of prediction errors.
+    -   R-squared (RSQ): To measure how well the model explains the
+        variance in the data.
+    -   Mean Absolute Error (MAE): To assess the average absolute
+        difference between predicted and observed counts.
+-   **Variable Importance:**
+    -   Use Random Forest’s feature importance scores to identify the
+        most influential predictors.
+
+## Training models
+
+### Null model
+
+```{r}
+#| label: null-model
+
+# Set up the null model
+null_model <- null_model(mode = "regression") |>
+  set_engine("parsnip")
+
+# Build the recipe
+null_recipe <- recipe(Total ~ ., data = train_data) |>
+  step_rm(County)
+
+# Build the workflow
+null_workflow <- workflow() |>
+  add_model(null_model) |>
+  add_recipe(null_recipe)
+
+# Fit the null model to the training data
+null_fit <- fit(null_workflow, data = train_data)
+
+# Predict on the testing set
+test_predictions <- predict(null_fit, new_data = test_data) |>
+  bind_cols(test_data)
+
+# Calculate test metrics
+test_metrics <- test_predictions |>
+  metrics(truth = Total, estimate = .pred)
+
+test_metrics
+```
+
+The RMSE and MAE are significantly large, at 17,257.99 and 12,393.07,
+reflecting the simplicity of the null model. The R-squared value is NA,
+which is expected for a null model, as it does not use any predictors
+and cannot explain the variance in the data. This serves as a baseline
+model for comparison with the more complex models that we will create
+later.
+
+### Poisson Regression
+
+```{r}
+#| label: poisson-regression
+
+base_recipe <- recipe(Total ~ ., data = train_data) |>
+  step_mutate(
+    Year = as.numeric(Year) 
+  ) |>
+  step_dummy(all_nominal_predictors(), -all_outcomes()) 
+
+recipe_factor_year <- base_recipe |>
+  step_mutate(Year = factor(Year))
+
+model_factor_year <- poisson_reg() |>
+  set_engine("glm")
+
+workflow_factor_year <- workflow() |>
+  add_recipe(recipe_factor_year) |>
+  add_model(model_factor_year)
+
+fit_factor_year <- workflow_factor_year |>
+  fit(data = train_data)
+
+recipe_continuous_year <- base_recipe
+
+model_continuous_year <- poisson_reg() |>
+  set_engine("glm")
+
+workflow_continuous_year <- workflow() |>
+  add_recipe(recipe_continuous_year) |>
+  add_model(model_continuous_year)
+
+fit_continuous_year <- workflow_continuous_year |>
+  fit(data = train_data)
+
+# Evaluate the models on the test set
+predictions_factor_year <- fit_factor_year |>
+  predict(new_data = test_data) |>
+  bind_cols(test_data)
+
+predictions_continuous_year <- fit_continuous_year |>
+  predict(new_data = test_data) |>
+  bind_cols(test_data)
+
+metrics_factor_year <- predictions_factor_year |>
+  metrics(truth = Total, estimate = .pred)
+
+metrics_continuous_year <- predictions_continuous_year |>
+  metrics(truth = Total, estimate = .pred)
+
+# Metrics for Poisson Regression with Year factor
+print(metrics_factor_year)
+
+# Metrics for Poisson Regression with Year as a continuous variable
+print(metrics_continuous_year)
+```
+
+The analysis shows that using factor(Year) in the Poisson regression
+model provides better predictive accuracy compared to treating Year as a
+continuous variable. The model with factor(Year) achieves lower RMSE and
+MAE values and a slightly higher R², indicating it captures
+year-specific variations and trends more effectively. In contrast, the
+model using Year as a continuous variable struggles to account for
+non-linear or year-specific effects, resulting in less accurate
+predictions. These results suggest that including factor(Year) is a
+better approach for modeling total arrests when using Posisson
+regression.
+
+### Random Forest
+
+```{r}
+#| label: random-forest
+
+# Feature engineering: focusing on transformations
+base_recipe <- recipe(Total ~ ., data = train_data) |>
+  step_mutate(
+    Year = as.numeric(Year), # Convert Year to numeric
+    Mortgage_affordability_index = log(Mortgage_affordability_index + 1)
+  ) |>
+  step_dummy(all_nominal_predictors(), -all_outcomes()) |> # Dummy encode categorical variables
+  step_zv(all_predictors()) |> # Remove zero-variance predictors to avoid issues during modeling
+  step_normalize(all_numeric_predictors(), -all_outcomes()) # Normalize all numeric features
+
+rf_spec <- rand_forest(
+  mode = "regression",
+  trees = tune(),
+  mtry = tune(),
+  min_n = tune()
+) |>
+  set_engine("ranger", importance = "impurity")
+
+rf_workflow <- workflow() |>
+  add_recipe(base_recipe) |>
+  add_model(rf_spec)
+
+rf_grid <- grid_regular(
+  trees(range = c(500, 1500)),
+  mtry(range = c(3, 12)),
+  min_n(range = c(3, 10)),
+  levels = 5
+)
+
+set.seed(123)
+
+rf_res <- tune_grid(
+  rf_workflow,
+  resamples = cv_folds,
+  grid = rf_grid,
+  metrics = metric_set(rmse, rsq, mae)
+)
+
+best_rf <- select_best(rf_res, metric = "rmse")
+
+final_rf_workflow <- finalize_workflow(rf_workflow, best_rf)
+
+final_rf_fit <- final_rf_workflow |> fit(data = train_data)
+
+rf_predictions <- final_rf_fit |>
+  predict(new_data = test_data) |>
+  bind_cols(test_data)
+
+rf_metrics <- rf_predictions |>
+  metrics(truth = Total, estimate = .pred)
+
+print(rf_metrics)
+```
+
+The Random Forest Model has shown improvement, achieving an RMSE of
+868.47 and an R² of 0.9975, showing very good model fit and predictive
+accuracy. The MAE value of 304.18 further highlights the model's
+improved capability to closely predict the actual arrest values. By
+exploring the feature importance, we determined that crime-specific
+features, such as violent felonies and total felonies, are the strongest
+drivers of arrest counts. While less impactful, housing and
+mortgage-related variables contribute additional context to the model.
+They may indirectly capture socioeconomic conditions that correlate with
+crime levels.
+
+# Model evaluation
+
+The objective of this project was to predict the total number of adult arrests 
+in New York State counties based on key social, economic, and housing factors 
+from 2015 to 2022. By building predictive models, we aimed to understand how these 
+factors influence arrest counts, ultimately helping policymakers make informed 
+decisions about crime prevention and resource allocation.
+
+We evaluated three models: the **Null Model**, the **Poisson Regression Model**, 
+and the **Random Forest Model**.
+
+1.  **Null Model:** The null model served as a baseline for comparison. 
+It included no predictors and simply predicted the mean value of the 
+target variable (total number of adult arrests).
+
+|            |               |              |
+|------------|---------------|--------------|
+| **Metric** | **Estimator** | **Estimate** |
+| RMSE       | Standard      | 17,257.99    |
+| R²         | Standard      | NA           |
+| MAE        | Standard      | 12,393.07    |
+
+- **RMSE:** The high RMSE of 17,257.99 indicates poor predictive accuracy, as the 
+null model ignores any variability in the data.
+- **R²:** Not applicable (NA) because the null model does not include predictors.
+- **MAE:** The MAE of 12,393.07 further highlights the model’s inability to account 
+for important predictors.
+
+Overall, the null model demonstrates that using just the mean of the target 
+variable is insufficient for accurate predictions and underscores the need 
+for more complex models.
+
+2.  **Poisson Regression Model:** We applied a Poisson regression model
+    with two variations:
+
+- Variation 1 used factor (Year) to capture year-specific fixed effects.
+- Variation 2 used Year as a continuous variable to capture linear trends.
+We observed that Variation 1 provided better predictive accuracy, so we
+report those results here.
+
+|            |               |              |
+|------------|---------------|--------------|
+| **Metric** | **Estimator** | **Estimate** |
+| RMSE       | Standard      | 459.         |
+| R²         | Standard      | 0.999        |
+| MAE        | Standard      | 224.         |
+
+- **RMSE:** The RMSE of 459 shows a substantial improvement over the null model, 
+reflecting much better predictive accuracy.
+- **R²:** The model explains 99.9% of the variance in arrest counts, highlighting 
+its ability to capture key factors influencing arrest trends.
+- **MAE:** The MAE of 224 indicates a significant reduction in average prediction
+error compared to the null model.
+
+The strong performance of the Poisson regression model, particularly in accounting for 
+year-specific effects, demonstrates the importance of temporal factors in arrest trends.
+
+3.  **Random Forest Model:** The Random Forest model was trained using key predictors 
+from the dataset. Hyperparameter tuning was conducted to optimize its performance.
+
+|            |               |              |
+|------------|---------------|--------------|
+| **Metric** | **Estimator** | **Estimate** |
+| RMSE       | Standard      | 868.47       |
+| R²         | Standard      | 0.9975       |
+| MAE        | Standard      | 304.18       |
+
+- **RMSE:** The RMSE of 868.47 is higher than the Poisson regression 
+model’s RMSE of 459 but still represents a significant improvement over 
+the null model.
+- **R²:** With an R² of 0.9975, the Random Forest model explains 99.75% of the variance in arrest counts, which is competitive with the Poisson regression model.
+- **MAE:** The MAE of 304.18 is higher than the Poisson regression model’s MAE of 224, suggesting that the Poisson regression achieves better accuracy for predicting individual arrest counts.
+
+While the Random Forest model exhibits a slightly higher RMSE and MAE compared to the Poisson regression model, its R² value demonstrates that it effectively captures overall variance in arrest counts.
+
+# Insights and Conclusion
+
+The evaluation of three models highlighted key insights into predicting arrest trends 
+in New York State counties. The **Null Model**, serving as a baseline, relied solely on the 
+mean of the arrest data and exhibited high errors, underscoring its insufficiency for 
+accurately modeling arrest trends. In contrast, the **Poisson Regression Model** demonstrated 
+the best overall performance, with an RMSE of 459 and an R² of 0.999, capturing 99.9% 
+of the variance in arrest counts. By incorporating year-specific fixed effects, it effectively 
+captured temporal patterns, emphasizing the importance of accounting for year-to-year 
+variability. This model is particularly suited for understanding overarching trends and 
+guiding policy decisions on resource allocation.
+
+We selected the **Poisson Regression Model** as the final model for deployment due to its 
+strong predictive performance and interpretability. Its ability to reliably capture 
+temporal dynamics, coupled with its low RMSE, makes it the most appropriate choice for 
+predicting arrest trends over time. While the **Random Forest Model** achieved competitive 
+results, particularly with a lower MAE of 304.18 for individual-level predictions, the 
+Poisson Regression Model’s ability to explain broader trends and provide actionable 
+insights was prioritized.
+
+# Recommendations
+
+Based on the Poisson Regression Model’s results, we recommend leveraging its predictions 
+to guide policy decisions aimed at reducing arrest rates. The model’s ability to capture 
+temporal patterns highlights the importance of year-to-year trends, suggesting that 
+policymakers should monitor changes in socioeconomic and housing factors over time. 
+Specifically, resources could be allocated to counties with the highest predicted 
+arrest counts, focusing on addressing the underlying social and economic issues 
+driving these trends. The model can also serve as a decision-support tool to evaluate 
+the potential impact of proposed interventions, such as community programs or housing 
+initiatives, by incorporating changes in key predictors and assessing their effects 
+on arrest rates.
+
+However, the model has limitations that should be addressed in future improvements. 
+For example, the Poisson Regression Model assumes a linear relationship between 
+predictors and the logarithm of the outcome, which may oversimplify complex interactions 
+between variables. Additionally, incorporating more predictors, such as crime policies 
+or law enforcement practices, could enhance the model’s accuracy and provide a more 
+comprehensive understanding of arrest patterns. Since the final model does not achieve 
+an exceptionally low RMSE, it may be beneficial to create hybrid models by combining 
+the Poisson model with Random Forest predictions. This approach could leverage the 
+strengths of both models to achieve better accuracy.

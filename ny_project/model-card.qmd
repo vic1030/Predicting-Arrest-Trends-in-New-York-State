@@ -1,0 +1,371 @@
+---
+title: "Analyzing Socioeconomic and Housing Factors to Predict Arrest Trends in New York State"
+author: "Joyce Yan (qy249), Lydia Lin (dl2253), Victoria Xiao (sx287)"
+date: today
+format:
+  html:
+    fig-format: png
+params:
+  board: !expr library(googleCloudStorageR); pins::board_gcs(bucket = "info-4940-models", prefix = "skillful_wombat/")
+  name: skillful_wombat_model
+  version: 20241216T193757Z-4c1b8
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: import-packages
+library(tidymodels)
+library(dplyr)
+library(readr)
+library(tidyverse)
+library(vetiver)
+library(pins)
+library(yardstick)
+library(googleCloudStorageR)
+library(ggplot2)
+library(reshape2)
+library(poissonreg)
+library(yaml)
+```
+
+```{r}
+#| label: Data-Preprocessing
+# Load dataset
+df <- read_csv("data/merged_data.csv")
+# Ensure 'County' is treated as a character variable
+df <- df |> mutate(County = as.character(County))
+# Feature engineering to create new columns
+df <- df |>
+  mutate(
+    # Mortgage Affordability Index
+    Mortgage_affordability_index = With_mortgage / (Without_mortgage + 1),
+    # Log Housing Units
+    Log_housing_units = log(Total_housing_units + 1),
+    
+    # Log Mortgage Ratio
+    mortgage_ratio = With_mortgage / Total_housing_units,
+    Log_mortgage_ratio = log(mortgage_ratio + 1),
+    # Language × Education Interaction
+    Language_education_interaction = Limited_English * Less_than_9th_grade,
+    
+    # Unemployment × Poverty Interaction
+    Unemployment_poverty_interaction = Unemployment_rate * Below_poverty_level
+  )
+# Define the features to be included in the model
+model_features <- df |> 
+  select(
+    # Socio-economic and housing features
+    Mortgage_affordability_index,
+    Log_housing_units,
+    Log_mortgage_ratio,
+    Language_education_interaction,
+    Unemployment_poverty_interaction,
+    Unemployment_rate,
+    Median_household_income,
+    Below_poverty_level,
+    No_health_insurance,
+    
+    # Arrest data features
+    `Felony Total`,
+    `Drug Felony`,
+    `Violent Felony`,
+    `DWI Felony`,
+    `Other Felony`,
+    `Misdemeanor Total`,
+    `Drug Misdemeanor`,
+    `DWI Misdemeanor`,
+    `Property Misdemeanor`,
+    `Other Misdemeanor`,
+    County,
+    Year,
+    
+    # Target variable
+    Total
+  )
+# Split the data into training and test sets
+set.seed(123) # For reproducibility
+data_split <- initial_split(model_features, prop = 0.8, strata = Total)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+# Create 5-fold cross-validation splits
+cv_folds <- vfold_cv(train_data, v = 5, strata = Total)
+# Display the structure of the created data splits
+print(data_split)
+print(cv_folds)
+```
+
+```{r}
+#| label: Poisson-Regression-Model
+
+base_recipe <- recipe(Total ~ ., data = train_data) |>
+  step_mutate(
+    Year = as.numeric(Year) 
+  ) |>
+  step_dummy(all_nominal_predictors(), -all_outcomes()) 
+recipe_factor_year <- base_recipe |>
+  step_mutate(Year = factor(Year))
+model_factor_year <- poisson_reg() |>
+  set_engine("glm")
+workflow_factor_year <- workflow() |>
+  add_recipe(recipe_factor_year) |>
+  add_model(model_factor_year)
+fit_factor_year <- workflow_factor_year |>
+  fit(data = train_data)
+recipe_continuous_year <- base_recipe
+model_continuous_year <- poisson_reg() |>
+  set_engine("glm")
+workflow_continuous_year <- workflow() |>
+  add_recipe(recipe_continuous_year) |>
+  add_model(model_continuous_year)
+fit_continuous_year <- workflow_continuous_year |>
+  fit(data = train_data)
+# Evaluate the models on the test set
+predictions_factor_year <- fit_factor_year |>
+  predict(new_data = test_data) |>
+  bind_cols(test_data)
+predictions_continuous_year <- fit_continuous_year |>
+  predict(new_data = test_data) |>
+  bind_cols(test_data)
+metrics_factor_year <- predictions_factor_year |>
+  metrics(truth = Total, estimate = .pred)
+metrics_continuous_year <- predictions_continuous_year |>
+  metrics(truth = Total, estimate = .pred)
+# Metrics for Poisson Regression with Year factor
+print(metrics_factor_year)
+# Metrics for Poisson Regression with Year as a continuous variable
+print(metrics_continuous_year)
+# Define vetiver model for POISSON REGRESSION
+v <- vetiver_model(
+  model = fit_factor_year,
+  model_name = "poisson_regression",
+  description = "A Poisson regression model predicting Total arrests using Year and socioeconomic factors.",
+  metadata = list(metrics = metrics_factor_year),
+  versioned = TRUE
+)
+```
+
+```{r}
+#| label: setup
+#| include: false
+
+# Authenticate with Google Cloud Storage
+Sys.setenv(GCS_AUTH_FILE = "service-auth.json")  
+gcs_auth(json_file = Sys.getenv("GCS_AUTH_FILE"))
+# Connect to the GCS board
+board <- board_gcs(bucket = "info-4940-models", prefix = "skillful_wombat/")
+# Pin the Poisson Regression Model
+board |> vetiver_pin_write(v)
+board |> pin_meta("poisson_regression")
+# Confirm models are pinned
+board |> pin_list()
+```
+
+A [model card](https://doi.org/10.1145/3287560.3287596) provides brief, transparent, responsible reporting for a trained machine learning model.
+
+# Model details
+
+-Developed by TEAM Skillful-Wombat.
+
+-Model Description: A Poisson regression model predicting Total arrests using 
+year and socioeconomic factors. 
+
+-The model was trained on county-level data from 2015 to 2022, with 80% of the data used for training and 20% for testing. 
+The dataset includes 21 features such as unemployment rates, poverty levels, 
+housing characteristics, and year.
+
+-Feature Engineering and Preprocessing: Detailed feature transformations were applied to 
+enhance predictive power, such as:Interactions between poverty levels and unemployment rates.
+Logarithmic transformations of housing related features.
+One-hot encoding of categorical predictors, including Year.The dataset was 
+standardized and stratified during resampling to ensure balanced splits.
+
+-Version: 20241216T193757Z-4c1b8
+
+-Publication Date: 12/16/2024
+
+-Citation:If you use this model, 
+please cite:"Poisson Regression Model for Arrest Predictions in New York State, 
+developed by Skillful-Wombat. Published on December 16, 2024."
+
+-If you have questions about this model, please contact sx287@cornell.edu.
+
+# Intended use
+
+-Primary Intended Uses:
+Predict total adult arrests at the county-year level.
+Support policymakers in resource allocation and crime prevention strategies.
+Analyze the relationship between socioeconomic factors and arrest trends.
+
+-Primary Intended Users:
+Local government agencies.
+Policymakers and resource planners.
+Researchers in sociology, criminology, and economics.
+
+-Out-of-Scope Uses:
+Individual level arrest predictions.
+Real time crime detection or intervention.
+Legal decisions, such as sentencing or bail determination.
+
+# Important aspects/factors
+
+-Relevant Aspects:
+
+Demographic factors: Population density, language barriers, and education levels.
+Economic conditions: Unemployment rates, poverty levels, and household income.
+Housing characteristics: Housing affordability and ownership metrics.
+
+-Model Evaluation Focus:
+
+Calibration of predictions at the county level.
+Observed vs. predicted trends across socioeconomic features.
+
+# Metrics
+
+-Metrics Used:
+
+RMSE (Root Mean Square Error): Measures prediction error magnitude.
+R² (Coefficient of Determination): Evaluates model fit to the data.
+MAE (Mean Absolute Error): Provides average error magnitude.
+
+-How Metrics Were Computed:
+
+Metrics were evaluated using the yardstick package in the tidymodels framework.
+5-fold cross-validation was used to validate the model on training data.
+Final metrics were computed on an 80/20 train-test split.
+
+-Why These Metrics:
+
+RMSE is sensitive to large errors, making it a useful diagnostic tool.
+R² explains how well the model captures the variability in arrest counts.
+MAE offers a more interpretable average error magnitude.
+
+# Training data & evaluation data
+
+-The model was trained on socioeconomic and arrest data 
+  for 62 New York State counties from 2015 to 2022.
+  
+-The dataset was stratified by Total arrests to ensure balanced train test splits.
+
+```{r}
+glimpse(v$prototype)
+```
+
+-The test dataset consists of 20% of the data, stratified by the target variable.
+
+-We chose an **80/20 training-test split** stratified by the target variable, 
+Total (total arrest counts), to ensure both subsets reflect the distribution 
+of arrest counts. 
+
+```{r}
+# evaluation data
+data_val <- test_data
+## consider using a package like skimr or DataExplorer for automated
+## presentation of evaluation data characteristics
+library(skimr)
+skim(test_data)
+```
+
+# Quantitative analyses {.tabset}
+
+```{r}
+# Compute predictions for evaluation data
+library(parsnip)
+library(workflows)
+preds <- augment(v, data_val)
+# Evaluate metrics
+metrics(preds, truth = Total, estimate = .pred)
+```
+
+## Overall model performance
+
+```{r}
+preds |>
+  metrics(truth = Total, estimate = .pred)
+```
+
+## Disaggregated model performance
+
+```{r}
+preds |>
+  group_by(County) |>
+  metrics(truth = Total, estimate = .pred)
+```
+
+## Visualize model performance
+
+```{r}
+#| fig-height: 3
+#The function cal_plot_breaks is primarily designed for classification models with probabilistic outputs. Our dataset uses Poisson regression, which produces continuous predictions (.pred) rather than class probabilities. This mismatch will causes the function to fail, thus, we decide to use Binned Calibration Plot.
+# Create bins for predicted values
+calibration_data <- preds %>%
+  mutate(bin = cut(.pred, breaks = 10)) %>%  # Bin predicted values into 10 intervals
+  group_by(bin) %>%
+  summarize(
+    avg_pred = mean(.pred, na.rm = TRUE),
+    avg_actual = mean(Total, na.rm = TRUE)
+  )
+# Plot calibration curve
+ggplot(calibration_data, aes(x = avg_pred, y = avg_actual)) +
+  geom_point(size = 2) +
+  geom_line() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  labs(
+    title = "Binned Calibration Plot",
+    x = "Average Predicted Value",
+    y = "Average Observed Value"
+  ) +
+  theme_minimal()
+```
+
+## Make a custom plot
+
+```{r}
+# Create bins for predicted values
+calibration_data <- preds %>%
+  mutate(bin = cut(.pred, breaks = 10)) %>%  # Divide predictions into 10 bins
+  group_by(bin) %>%
+  summarize(
+    avg_pred = mean(.pred, na.rm = TRUE),
+    avg_actual = mean(Total, na.rm = TRUE)
+  )
+# Plot the observed vs predicted averages
+ggplot(calibration_data, aes(x = avg_pred, y = avg_actual)) +
+  geom_point() +
+  geom_line() +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  labs(
+    title = "Custom Calibration Plot for Regression",
+    x = "Average Predicted Value",
+    y = "Average Observed Value"
+  ) +
+  theme_minimal()
+```
+
+# Ethical considerations
+
+-Bias in Data: Arrest records may reflect systemic biases
+(e.g.,over-policing in disadvantaged areas) rather than actual crime levels.
+
+-Resource Allocation: Predictions must be used cautiously to avoid reinforcing 
+inequities in law enforcement resource distribution.
+
+-Transparency:Clear explanations should accompany model predictions 
+toensure ethical use and avoid misinterpretation.
+
+# Caveats & recommendations
+
+-What the Model Does:
+Predict total adult arrests based on socioeconomic conditions at the county level.
+Identify key drivers of arrest trends, such as unemployment and poverty rates.
+
+-What the Model Does Not Do:
+Predict individual-level arrests.
+Establish causal relationships between features and arrests.
+
+-Recommendations:
+Combine predictions with qualitative insights to guide decisions.
+Regularly update the model with new data to ensure relevance and accuracy.
+Use results as part of broader policy discussions, not as definitive outcomes.

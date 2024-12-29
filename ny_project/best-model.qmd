@@ -1,0 +1,198 @@
+---
+title: "Best Model for Predicting the Number of Arrests in New York State"
+---
+
+# Set up
+
+```{r}
+#| label: import-packages
+
+library(dplyr)
+library(tidyverse)
+library(tidymodels)
+library(parsnip)
+library(poissonreg)
+```
+
+# Feature Engineering
+
+```{r}
+#| label: feature-engineering
+
+df = read_csv("data/merged_data.csv")
+
+# Create the engineered features
+df <- df |>
+  mutate(
+    # Mortgage Affordability Index
+    Mortgage_affordability_index = With_mortgage / (Without_mortgage + 1),
+    
+    # Log Housing Units
+    Log_housing_units = log(Total_housing_units + 1),
+    
+    # Log Mortgage Ratio
+    mortgage_ratio = With_mortgage / Total_housing_units,
+    Log_mortgage_ratio = log(mortgage_ratio + 1),
+    
+    # Language × Education Interaction
+    Language_education_interaction = Limited_English * Less_than_9th_grade,
+    
+    # Unemployment × Poverty Interaction
+    Unemployment_poverty_interaction = Unemployment_rate * Below_poverty_level
+  )
+
+model_features <- df |> 
+  select(
+    # Socio-economic and housing features
+    Mortgage_affordability_index,
+    Log_housing_units,
+    Log_mortgage_ratio,
+    Language_education_interaction,
+    Unemployment_poverty_interaction,
+    Unemployment_rate,
+    Median_household_income,
+    Below_poverty_level,
+    No_health_insurance,
+    
+    # Arrest data features
+    `Felony Total`,
+    `Drug Felony`,
+    `Violent Felony`,
+    `DWI Felony`,
+    `Other Felony`,
+    `Misdemeanor Total`,
+    `Drug Misdemeanor`,
+    `DWI Misdemeanor`,
+    `Property Misdemeanor`,
+    `Other Misdemeanor`,
+    County,
+    Year,
+    
+    # Target variable
+    Total
+  )
+```
+
+# Resampling
+
+```{r}
+#| label: resampling
+
+set.seed(123)
+
+data_split <- initial_split(model_features, prop = 0.8, strata = Total)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+cv_folds <- vfold_cv(train_data, v = 5, strata = Total)
+
+all_metrics <- metric_set(rmse, rsq, mae)
+```
+
+# Best Model - Poisson Regression
+
+```{r}
+#| label: best-model
+
+base_recipe <- recipe(Total ~ ., data = train_data) |>
+  step_mutate(
+    Year = as.numeric(Year) 
+  ) |>
+  step_dummy(all_nominal_predictors(), -all_outcomes()) 
+
+recipe_factor_year <- base_recipe |>
+  step_mutate(Year = factor(Year))
+
+model_factor_year <- poisson_reg() |>
+  set_engine("glm")
+
+workflow_factor_year <- workflow() |>
+  add_recipe(recipe_factor_year) |>
+  add_model(model_factor_year)
+
+fit_factor_year <- workflow_factor_year |>
+  fit(data = train_data)
+
+recipe_continuous_year <- base_recipe
+
+model_continuous_year <- poisson_reg() |>
+  set_engine("glm")
+
+workflow_continuous_year <- workflow() |>
+  add_recipe(recipe_continuous_year) |>
+  add_model(model_continuous_year)
+
+fit_continuous_year <- workflow_continuous_year |>
+  fit(data = train_data)
+
+# Evaluate the models on the test set
+predictions_factor_year <- fit_factor_year |>
+  predict(new_data = test_data) |>
+  bind_cols(test_data)
+
+predictions_continuous_year <- fit_continuous_year |>
+  predict(new_data = test_data) |>
+  bind_cols(test_data)
+
+metrics_factor_year <- predictions_factor_year |>
+  metrics(truth = Total, estimate = .pred)
+
+metrics_continuous_year <- predictions_continuous_year |>
+  metrics(truth = Total, estimate = .pred)
+
+# Metrics for Poisson Regression with Year factor
+print(metrics_factor_year)
+
+# Metrics for Poisson Regression with Year as a continuous variable
+print(metrics_continuous_year)
+```
+
+# Deploy Model
+
+```{r}
+#| label: deploy
+
+library(tidyverse)
+library(pins)
+library(vetiver)
+library(googleCloudStorageR)
+
+board <- board_gcs(bucket = "info-4940-models", prefix = "skillful-wombat/")
+
+# Create a vetiver model
+v <- vetiver_model(
+  model = fit_factor_year, 
+  model_name = "poisson-nys-crime",
+  description = "A poisson regression model to predict the total number of adult arrests in New York State",
+  metadata = list(metrics = metrics_factor_year),
+  )
+
+board |>
+  vetiver_pin_write(v)
+
+board |>
+  pin_meta("poisson-nys-crime")
+```
+
+
+```{r}
+#| label: prepare-docker
+
+vetiver_prepare_docker(
+  board = board,
+  name = "poisson-nys-crime",
+  docker_args = list(port = 2568)
+)
+
+```
+
+```{r}
+#| label: write-docker
+# vetiver_write_docker(
+#   board,
+#   "poisson-nys-crime",
+#   port = 2568,
+#   additional_pkgs = required_pkgs(board)
+# )
+```
+
